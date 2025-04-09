@@ -156,7 +156,7 @@ def ridge_autoregressive_model(df, config):
     X_train = X_train.loc[valid_idx]
     y_train = y_train.loc[valid_idx]
 
-    model = Ridge(alpha=1.0)
+    model = Ridge(alpha=450.0)
     model.fit(X_train, y_train)
 
     X_all = df[selected_features].fillna(0)
@@ -236,11 +236,56 @@ def adjust_for_objectives(df):
 
 def make_predictions(config):
     df_sales = pd.read_csv(config["data"]["sales"])
+    df_sales["dates"] = pd.to_datetime(df_sales["dates"])
 
-    df_sales["prediction"] = df_sales.groupby("item_id")["sales"].shift(1)
+    model_name = config.get("model", "PrevMonthSale")
 
-    df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
-        drop=True
-    )
+    if model_name == "PrevMonthSale":
+        df_sales["prediction"] = df_sales.groupby("item_id")["sales"].shift(1)
 
-    return df_sales[["dates", "item_id", "prediction"]]
+        df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
+            drop=True
+        )
+
+        return df_sales[["dates", "item_id", "prediction"]]
+
+    elif model_name == "SameMonthLastYearSales":
+        df_sales["prediction"] = df_sales.groupby("item_id")["sales"].shift(12)
+
+        df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
+            drop=True
+        )
+
+        return df_sales[["dates", "item_id", "prediction"]]
+
+    elif model_name == "Ridge":
+        # Load external data if specified, else empty DataFrames
+        external_data = {}
+        for key in ["marketing", "price", "stock", "objectives"]:
+            path = config.get("data", {}).get(key, None)
+            if path:
+                external_data[key] = pd.read_csv(path)
+                if "dates" in external_data[key].columns:
+                    external_data[key]["dates"] = pd.to_datetime(
+                        external_data[key]["dates"]
+                    )
+            else:
+                external_data[key] = pd.DataFrame()
+
+        # Prepare sales_target column
+        df_sales["sales_target"] = df_sales["sales"]
+
+        # Feature engineering
+        df_features = feature_engineering(df_sales, external_data)
+
+        # Model training and prediction
+        df_pred = ridge_autoregressive_model(df_features, config)
+
+        df_pred = df_pred[df_pred["dates"] >= config["start_test"]].reset_index(
+            drop=True
+        )
+
+        return df_pred[["dates", "item_id", "prediction"]]
+
+    else:
+        raise ValueError(f"Unknown model: {model_name}")

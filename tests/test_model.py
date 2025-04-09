@@ -47,10 +47,11 @@ def test_autoregressive_model():
     config = {
         "data": {
             "sales": "data/raw/sales.csv",
+            "marketing": "data/raw/marketing.csv",
         },
         "start_test": "2023-07-01",
         "model": "Ridge",
-        "features": ["past_sales"],
+        "features": ["past_sales", "marketing"],
     }
 
     df_pred = main.make_predictions(config)
