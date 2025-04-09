@@ -78,7 +78,6 @@ def build_feature(df_sales, external_data):
         df["price_change"] = (df["future_price"] - df["price"]) / df["price"].replace(
             0, 1
         )
-        # Use price_change; compute price_effect to reflect client ordering behavior.
         df["price_effect"] = df["price_change"]
         df["price_change"] = df["price_change"].fillna(0)
         df["price"] = df["price"].ffill().bfill()
@@ -135,7 +134,7 @@ def ridge_autoregressive_model(df, config):
         "price": [
             "price",
             "price_effect",
-        ],  # updated: use price_effect instead of price_change
+        ],
         "stock": ["stock_end_month", "stockout", "stockout_prev"],
         "objectives": ["target_obj"],
     }
@@ -162,7 +161,6 @@ def ridge_autoregressive_model(df, config):
     X_train = X_train.loc[valid_idx]
     y_train = y_train.loc[valid_idx]
 
-    # Use lower alpha when the "price" feature is included
     alpha = 80.0 if "price" in config.get("features", []) else 450.0
     model = Ridge(alpha=alpha)
     model.fit(X_train, y_train)
@@ -257,7 +255,6 @@ def make_predictions(config):
 
     elif model_name == "SameMonthLastYearSales":
         df_sales["sales_target"] = df_sales["sales"]
-        # Build the needed lag_12 feature
         df_sales = df_sales.sort_values(["item_id", "dates"])
         df_sales["lag_12"] = df_sales.groupby("item_id")["sales_target"].shift(12)
         df_sales = same_month_last_year_model(df_sales)
