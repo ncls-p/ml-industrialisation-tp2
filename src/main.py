@@ -144,6 +144,12 @@ def ridge_autoregressive_model(df, config):
         if feat in feature_map:
             selected_features.extend(feature_map[feat])
 
+    for extra_feat in ["marketing", "price"]:
+        if extra_feat in feature_map:
+            for col in feature_map[extra_feat]:
+                if col in df.columns and col not in selected_features:
+                    selected_features.append(col)
+
     for feature in selected_features:
         if feature not in df.columns:
             df[feature] = 0
@@ -267,6 +273,8 @@ def make_predictions(config):
         external_data = {}
         for key in ["marketing", "price", "stock", "objectives"]:
             path = config.get("data", {}).get(key, None)
+            if not path and key == "marketing":
+                path = "data/raw/marketing.csv"
             if path:
                 external_data[key] = pd.read_csv(path)
                 if "dates" in external_data[key].columns:
