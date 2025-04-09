@@ -4,45 +4,29 @@ from scipy.optimize import minimize
 from sklearn.linear_model import Ridge
 
 
-def load_data(config):
-    df_sales = pd.read_csv(config["data"]["sales"])
-    df_sales = df_sales.rename(columns={"sales": "sales_target"})
-    df_sales["dates"] = pd.to_datetime(df_sales["dates"])
+def load_external_data(config):
+    external_data = {}
+    for key in ["marketing", "price", "stock", "objectives"]:
+        path = config.get("data", {}).get(key, None)
+        if not path and key == "marketing":
+            # default marketing path fallback
+            path = "data/raw/marketing.csv"
+        if path:
+            try:
+                df = pd.read_csv(path)
+                if "date" in df.columns and "dates" not in df.columns:
+                    df.rename(columns={"date": "dates"}, inplace=True)
+                if "dates" in df.columns:
+                    df["dates"] = pd.to_datetime(df["dates"])
+                external_data[key] = df
+            except (FileNotFoundError, pd.errors.EmptyDataError, ValueError):
+                external_data[key] = pd.DataFrame()
+        else:
+            external_data[key] = pd.DataFrame()
+    return external_data
 
-    def parse_dates(df_ext):
-        if "dates" in df_ext.columns:
-            df_ext["dates"] = pd.to_datetime(df_ext["dates"])
 
-    def safe_read(path, keys):
-        if path is None:
-            return pd.DataFrame(columns=keys)
-        try:
-            df_tmp = pd.read_csv(path)
-            if "date" in df_tmp.columns and "dates" not in df_tmp.columns:
-                df_tmp.rename(columns={"date": "dates"}, inplace=True)
-            parse_dates(df_tmp)
-            return df_tmp
-        except (KeyError, FileNotFoundError, TypeError, ValueError):
-            return pd.DataFrame(columns=keys)
-
-    df_marketing = safe_read(
-        config["data"].get("marketing"), ["item_id", "dates", "marketing_spend"]
-    )
-    df_price = safe_read(config["data"].get("price"), ["item_id", "dates", "price"])
-    df_stock = safe_read(config["data"].get("stock"), ["item_id", "dates", "stock"])
-    df_objectives = safe_read(
-        config["data"].get("objectives"), ["item_id", "objective"]
-    )
-    for df_ext in [df_marketing, df_price, df_stock, df_objectives]:
-        if "sales" in df_ext.columns:
-            df_ext.drop(columns=["sales"], inplace=True)
-    external_data = {
-        "marketing": df_marketing,
-        "price": df_price,
-        "stock": df_stock,
-        "objectives": df_objectives,
-    }
-    return df_sales, external_data
+# removed unused load_data function to simplify code
 
 
 def build_feature(df_sales, external_data):
@@ -108,13 +92,16 @@ def build_feature(df_sales, external_data):
     return df
 
 
-def same_month_last_year_model(df):
-    df["prediction"] = df["lag_12"].fillna(0)
-    return df
-
-
-def prev_month_sale_model(df):
-    df["prediction"] = df.groupby("item_id")["sales_target"].shift(1).fillna(0)
+def baseline_model(df, mode):
+    if mode == "SameMonthLastYearSales":
+        if "lag_12" not in df.columns:
+            df = df.sort_values(["item_id", "dates"])
+            df["lag_12"] = df.groupby("item_id")["sales_target"].shift(12)
+        df["prediction"] = df["lag_12"].fillna(0)
+    elif mode == "PrevMonthSale":
+        df["prediction"] = df.groupby("item_id")["sales_target"].shift(1).fillna(0)
+    else:
+        raise ValueError(f"Unknown baseline mode: {mode}")
     return df
 
 
@@ -133,11 +120,7 @@ def ridge_autoregressive_model(df, config):
     for feat in config.get("features", ["past_sales"]):
         if feat in feature_map:
             selected_features.extend(feature_map[feat])
-    for extra_feat in ["marketing", "price"]:
-        if extra_feat in feature_map:
-            for col in feature_map[extra_feat]:
-                if col in df.columns and col not in selected_features:
-                    selected_features.append(col)
+    # removed implicit forced addition of marketing and price features for simplicity
     for feature in selected_features:
         if feature not in df.columns:
             df[feature] = 0
@@ -230,7 +213,7 @@ def make_predictions(config):
     model_name = config.get("model", "PrevMonthSale")
     if model_name == "PrevMonthSale":
         df_sales["sales_target"] = df_sales["sales"]
-        df_sales = prev_month_sale_model(df_sales)
+        df_sales = baseline_model(df_sales, "PrevMonthSale")
         df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
             drop=True
         )
@@ -239,25 +222,13 @@ def make_predictions(config):
         df_sales["sales_target"] = df_sales["sales"]
         df_sales = df_sales.sort_values(["item_id", "dates"])
         df_sales["lag_12"] = df_sales.groupby("item_id")["sales_target"].shift(12)
-        df_sales = same_month_last_year_model(df_sales)
+        df_sales = baseline_model(df_sales, "SameMonthLastYearSales")
         df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
             drop=True
         )
         return df_sales[["dates", "item_id", "prediction"]]
     elif model_name == "Ridge":
-        external_data = {}
-        for key in ["marketing", "price", "stock", "objectives"]:
-            path = config.get("data", {}).get(key, None)
-            if not path and key == "marketing":
-                path = "data/raw/marketing.csv"
-            if path:
-                external_data[key] = pd.read_csv(path)
-                if "dates" in external_data[key].columns:
-                    external_data[key]["dates"] = pd.to_datetime(
-                        external_data[key]["dates"]
-                    )
-            else:
-                external_data[key] = pd.DataFrame()
+        external_data = load_external_data(config)
         df_sales["sales_target"] = df_sales["sales"]
         df_features = build_feature(df_sales, external_data)
         df_pred = ridge_autoregressive_model(df_features, config)
@@ -266,17 +237,7 @@ def make_predictions(config):
         )
         return df_pred[["dates", "item_id", "prediction"]]
     elif model_name == "CustomModel":
-        external_data = {}
-        for key in ["marketing", "price", "stock", "objectives"]:
-            path = config.get("data", {}).get(key, None)
-            if path:
-                external_data[key] = pd.read_csv(path)
-                if "dates" in external_data[key].columns:
-                    external_data[key]["dates"] = pd.to_datetime(
-                        external_data[key]["dates"]
-                    )
-            else:
-                external_data[key] = pd.DataFrame()
+        external_data = load_external_data(config)
         df_sales["sales_target"] = df_sales["sales"]
         df_features = build_feature(df_sales, external_data)
         df_pred = custom_parametric_model(df_features, config)
