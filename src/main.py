@@ -48,15 +48,7 @@ def load_data(config):
     return df_sales, external_data
 
 
-# Renamed function: build_feature builds autoregressive and external-features as required.
 def build_feature(df_sales, external_data):
-    # Auto-regressive feature engineering:
-    # - lag_12: Sales of the same month last year.
-    # - avg_12: Average sales over the previous 12 months.
-    # - recent_sales: Sum of sales over the last 3 months.
-    # - past_sales: Sum of sales from M-13 to M-15.
-    # - qoq_growth: Growth ratio computed as recent_sales / past_sales.
-    # - feat_c: Combination of lag_12 and qoq_growth.
     df = df_sales.copy()
     df = df.sort_values(["item_id", "dates"])
     df["lag_12"] = df.groupby("item_id")["sales_target"].shift(12)
@@ -275,7 +267,6 @@ def make_predictions(config):
         return df_sales[["dates", "item_id", "prediction"]]
 
     elif model_name == "Ridge":
-        # Load external data if specified, else empty DataFrames
         external_data = {}
         for key in ["marketing", "price", "stock", "objectives"]:
             path = config.get("data", {}).get(key, None)
@@ -288,13 +279,10 @@ def make_predictions(config):
             else:
                 external_data[key] = pd.DataFrame()
 
-        # Prepare sales_target column
         df_sales["sales_target"] = df_sales["sales"]
 
-        # Feature engineering
         df_features = build_feature(df_sales, external_data)
 
-        # Model training and prediction
         df_pred = ridge_autoregressive_model(df_features, config)
 
         df_pred = df_pred[df_pred["dates"] >= config["start_test"]].reset_index(
@@ -304,7 +292,6 @@ def make_predictions(config):
         return df_pred[["dates", "item_id", "prediction"]]
 
     elif model_name == "CustomModel":
-        # Similar to Ridge branch: load external data and engineer features
         external_data = {}
         for key in ["marketing", "price", "stock", "objectives"]:
             path = config.get("data", {}).get(key, None)
