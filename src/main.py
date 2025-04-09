@@ -48,10 +48,17 @@ def load_data(config):
     return df_sales, external_data
 
 
-def feature_engineering(df_sales, external_data):
+# Renamed function: build_feature builds autoregressive and external-features as required.
+def build_feature(df_sales, external_data):
+    # Auto-regressive feature engineering:
+    # - lag_12: Sales of the same month last year.
+    # - avg_12: Average sales over the previous 12 months.
+    # - recent_sales: Sum of sales over the last 3 months.
+    # - past_sales: Sum of sales from M-13 to M-15.
+    # - qoq_growth: Growth ratio computed as recent_sales / past_sales.
+    # - feat_c: Combination of lag_12 and qoq_growth.
     df = df_sales.copy()
     df = df.sort_values(["item_id", "dates"])
-
     df["lag_12"] = df.groupby("item_id")["sales_target"].shift(12)
     df["avg_12"] = df.groupby("item_id")["sales_target"].transform(
         lambda x: x.shift(1).rolling(12, min_periods=1).mean()
@@ -79,7 +86,10 @@ def feature_engineering(df_sales, external_data):
         df["price_change"] = (df["future_price"] - df["price"]) / df["price"].replace(
             0, 1
         )
+        # Use price_change; compute price_effect to reflect client ordering behavior.
+        df["price_effect"] = df["price_change"]
         df["price_change"] = df["price_change"].fillna(0)
+        df["price"] = df["price"].ffill().bfill()
 
     if not external_data["stock"].empty:
         df = df.merge(external_data["stock"], on=["item_id", "dates"], how="left")
@@ -130,7 +140,10 @@ def ridge_autoregressive_model(df, config):
     feature_map = {
         "past_sales": ["lag_12", "avg_12", "feat_c"],
         "marketing": ["marketing_spend"],
-        "price": ["price_change"],
+        "price": [
+            "price",
+            "price_effect",
+        ],  # updated: use price_effect instead of price_change
         "stock": ["stock_end_month", "stockout", "stockout_prev"],
         "objectives": ["target_obj"],
     }
@@ -150,16 +163,18 @@ def ridge_autoregressive_model(df, config):
 
     X_train = df.loc[train_mask, selected_features].fillna(0)
     y_train = df.loc[train_mask, "sales_target"]
+    X_all = df[selected_features].fillna(0)
 
     y_train = pd.to_numeric(y_train, errors="coerce")
     valid_idx = ~y_train.isna()
     X_train = X_train.loc[valid_idx]
     y_train = y_train.loc[valid_idx]
 
-    model = Ridge(alpha=450.0)
+    # Use lower alpha when the "price" feature is included
+    alpha = 80.0 if "price" in config.get("features", []) else 450.0
+    model = Ridge(alpha=alpha)
     model.fit(X_train, y_train)
 
-    X_all = df[selected_features].fillna(0)
     df["prediction"] = model.predict(X_all)
 
     if "stock" in config.get("features", []) and "stock_end_month" in df.columns:
@@ -241,21 +256,22 @@ def make_predictions(config):
     model_name = config.get("model", "PrevMonthSale")
 
     if model_name == "PrevMonthSale":
-        df_sales["prediction"] = df_sales.groupby("item_id")["sales"].shift(1)
-
+        df_sales["sales_target"] = df_sales["sales"]
+        df_sales = prev_month_sale_model(df_sales)
         df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
             drop=True
         )
-
         return df_sales[["dates", "item_id", "prediction"]]
 
     elif model_name == "SameMonthLastYearSales":
-        df_sales["prediction"] = df_sales.groupby("item_id")["sales"].shift(12)
-
+        df_sales["sales_target"] = df_sales["sales"]
+        # Build the needed lag_12 feature
+        df_sales = df_sales.sort_values(["item_id", "dates"])
+        df_sales["lag_12"] = df_sales.groupby("item_id")["sales_target"].shift(12)
+        df_sales = same_month_last_year_model(df_sales)
         df_sales = df_sales[df_sales["dates"] >= config["start_test"]].reset_index(
             drop=True
         )
-
         return df_sales[["dates", "item_id", "prediction"]]
 
     elif model_name == "Ridge":
@@ -276,7 +292,7 @@ def make_predictions(config):
         df_sales["sales_target"] = df_sales["sales"]
 
         # Feature engineering
-        df_features = feature_engineering(df_sales, external_data)
+        df_features = build_feature(df_sales, external_data)
 
         # Model training and prediction
         df_pred = ridge_autoregressive_model(df_features, config)
@@ -285,6 +301,27 @@ def make_predictions(config):
             drop=True
         )
 
+        return df_pred[["dates", "item_id", "prediction"]]
+
+    elif model_name == "CustomModel":
+        # Similar to Ridge branch: load external data and engineer features
+        external_data = {}
+        for key in ["marketing", "price", "stock", "objectives"]:
+            path = config.get("data", {}).get(key, None)
+            if path:
+                external_data[key] = pd.read_csv(path)
+                if "dates" in external_data[key].columns:
+                    external_data[key]["dates"] = pd.to_datetime(
+                        external_data[key]["dates"]
+                    )
+            else:
+                external_data[key] = pd.DataFrame()
+        df_sales["sales_target"] = df_sales["sales"]
+        df_features = build_feature(df_sales, external_data)
+        df_pred = custom_parametric_model(df_features, config)
+        df_pred = df_pred[df_pred["dates"] >= config["start_test"]].reset_index(
+            drop=True
+        )
         return df_pred[["dates", "item_id", "prediction"]]
 
     else:
